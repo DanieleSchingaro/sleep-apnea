@@ -1,0 +1,22 @@
+# --- file generati a runtime: NON vanno versionati ---
+apnea.db
+apnea.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- editor / OS ---
+.vscode/
+.DS_Store
+
+# --- FlexSim / SketchUp: file di backup automatici ---
+*.bak
+*.~*
+~*.skp
+
+# NOTA: i modelli FlexSim (.fsm) e SketchUp (.skp) "buoni" puoi versionarli,
+# ma sono binari: due persone non possono modificarli in parallelo.
+# Coordinatevi (uno alla volta) o valutate Git LFS per i file grandi.
