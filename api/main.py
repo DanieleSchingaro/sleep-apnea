@@ -18,6 +18,7 @@ Doc interattiva: http://localhost:8000/docs
 """
 import logging
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -70,7 +71,7 @@ init_db()
 class EventIn(BaseModel):
     type: str                          # "APNEA" | "SNOOZE"
     device_code: str                   # es. "DEV01"
-    ts: str                            # "YYYY-MM-DD HH:MM:SS"
+    ts: Optional[str] = None           # se assente, lo mette il server (device senza RTC)
     threshold_sec: Optional[int] = None
     oscillation: Optional[float] = None
     source: str = "hardware"           # "hardware" | "simulazione"
@@ -91,31 +92,32 @@ class CommandIn(BaseModel):
 @app.post("/events")
 def post_event(ev: EventIn):
     t = ev.type.upper()
+    ts = ev.ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # orario lato server se assente
     conn = get_conn()
     cur = conn.cursor()
     if t == "APNEA":
         cur.execute(
             "INSERT INTO apnea_events (device_code, ts, threshold_sec, oscillation, source) "
             "VALUES (?,?,?,?,?)",
-            (ev.device_code, ev.ts, ev.threshold_sec, ev.oscillation, ev.source),
+            (ev.device_code, ts, ev.threshold_sec, ev.oscillation, ev.source),
         )
         event_id = cur.lastrowid
         cur.execute("INSERT INTO commands (device_code, command) VALUES (?, 'ALARM_ON')",
                     (ev.device_code,))
         conn.commit(); conn.close()
         log.info("APNEA  device=%s ts=%s soglia=%ss osc=%s source=%s (id=%s)",
-                 ev.device_code, ev.ts, ev.threshold_sec, ev.oscillation, ev.source, event_id)
+                 ev.device_code, ts, ev.threshold_sec, ev.oscillation, ev.source, event_id)
         return {"status": "ok", "type": "APNEA", "id": event_id}
 
     if t in ("SNOOZE", "SNOOZE_ACTIVATED"):
         cur.execute("INSERT INTO snooze_events (device_code, ts, source) VALUES (?,?,?)",
-                    (ev.device_code, ev.ts, ev.source))
+                    (ev.device_code, ts, ev.source))
         event_id = cur.lastrowid
         cur.execute("INSERT INTO commands (device_code, command) VALUES (?, 'ALARM_OFF')",
                     (ev.device_code,))
         conn.commit(); conn.close()
         log.info("SNOOZE device=%s ts=%s source=%s (id=%s)",
-                 ev.device_code, ev.ts, ev.source, event_id)
+                 ev.device_code, ts, ev.source, event_id)
         return {"status": "ok", "type": "SNOOZE", "id": event_id}
 
     conn.close()

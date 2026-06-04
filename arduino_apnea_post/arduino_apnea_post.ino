@@ -1,45 +1,50 @@
 /*
  * ============================================================
- * Sleep Apnea Monitor - LATO COMUNICAZIONE (Arduino Nano 33 IoT)
+ * Sleep Apnea Monitor - Nano 33 IoT (RILEVAMENTO + INVIO WiFi)
  * ------------------------------------------------------------
- * Niente cavo: invia gli eventi APNEA/SNOOZE all'API FastAPI via
- * HTTP POST sulla rete WiFi, e preleva i comandi di attuazione.
+ * Algoritmo di rilevamento: invariato rispetto al codice base.
+ * Aggiunto: connessione WiFi e POST /events all'API FastAPI
+ *   - APNEA  quando scatta l'allarme
+ *   - SNOOZE quando il pulsante resetta un allarme attivo
+ * Le credenziali WiFi stanno in arduino_secrets.h (NON versionato).
  *
- * La logica di RILEVAMENTO (algoritmo a oscillazione gia' calibrato)
- * NON e' qui: si collega tramite gli hook detectApnea() e snoozePressed()
- * in fondo al file. Cosi' chi cura l'Arduino lavora sul rilevamento
- * e questo file resta il "contratto" verso l'API.
- *
- * Librerie (Gestore librerie di Arduino IDE):
- *   - WiFiNINA
- *   - ArduinoHttpClient
- *   - RTClib  (per il DS1307)
+ * Librerie: WiFiNINA, ArduinoHttpClient
  * ============================================================
  */
 #include <WiFiNINA.h>
 #include <ArduinoHttpClient.h>
-#include <Wire.h>
-#include <RTClib.h>
+#include "arduino_secrets.h"
 
-// ---- configurazione rete e server ----
-const char* WIFI_SSID   = "NOME_RETE";
-const char* WIFI_PASS   = "PASSWORD";
-const char* SERVER_IP   = "192.168.1.10";   // IP del PC che esegue FastAPI
+// --- CONFIGURAZIONE RETE / API ---
+const char* WIFI_SSID   = SECRET_SSID;     // da arduino_secrets.h
+const char* WIFI_PASS   = SECRET_PASS;     // da arduino_secrets.h
+const char* SERVER_IP   = "192.168.1.10";  // IP del PC che esegue FastAPI
 const int   SERVER_PORT = 8000;
-const char* DEVICE_CODE = "DEV01";           // identifica la stanza lato API
-
-// ---- pinout (dal progetto) ----
-const int PIN_MIC    = A0;
-const int PIN_SNOOZE = 2;    // D2, INPUT_PULLUP, attivo LOW
-const int PIN_BUZZER = 3;    // D3
-const int PIN_RELAY  = 4;    // D4
-
-const int APNEA_THRESHOLD_SEC = 12;
+const char* DEVICE_CODE = "DEV01";         // identifica la stanza lato API
 
 WiFiClient wifi;
 HttpClient http = HttpClient(wifi, SERVER_IP, SERVER_PORT);
-RTC_DS1307 rtc;
 
+// --- CONFIGURAZIONE PIN ---
+const int pinAnalogico = A0;  // Output Analogico del modulo Big Sound
+const int pinButton = 2;     // Pulsante di Stop/Reset Allarme (collegato a GND)
+const int pinBuzzer = 3;     // Pin dedicato al Buzzer
+const int pinLEDRosso = 8;   // LED Rosso classico a due piedini collegato al Pin D8
+
+// --- COSTANTI DI TEMPO ---
+const unsigned long INTERVALLO = 250; // Finestra di campionamento microfono (250ms)
+const int SOGLIA_APNEA_SECONDI = 12;  // Secondi di silenzio prima dell'allarme
+
+// --- SOGLIA DI SILENZIO RICHIESTA ---
+const int SOGLIA_SILENZIO = 30; 
+
+// --- VARIABILI DI STATO ---
+unsigned long ultimoRespiroMillis = 0; 
+bool inAllarme = false;
+unsigned long lastBuzzerToggle = 0;
+bool buzzerState = false;
+
+// --- WiFi: connessione (richiamata anche se cade) ---
 void connectWiFi() {
   Serial.print("Connessione WiFi");
   while (WiFi.begin(WIFI_SSID, WIFI_PASS) != WL_CONNECTED) {
@@ -50,36 +55,14 @@ void connectWiFi() {
   Serial.println(WiFi.localIP());
 }
 
-void setup() {
-  Serial.begin(115200);
-  pinMode(PIN_SNOOZE, INPUT_PULLUP);
-  pinMode(PIN_BUZZER, OUTPUT);
-  pinMode(PIN_RELAY, OUTPUT);
-  Wire.begin();
-  rtc.begin();
-  // se l'RTC non e' mai stato impostato, scommentare per inizializzarlo:
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  connectWiFi();
-}
-
-// timestamp "YYYY-MM-DD HH:MM:SS" dal DS1307
-String nowString() {
-  DateTime n = rtc.now();
-  char buf[20];
-  sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d",
-          n.year(), n.month(), n.day(), n.hour(), n.minute(), n.second());
-  return String(buf);
-}
-
-// invia un evento all'API in JSON -> POST /events
-void sendEvent(const char* type, int thresholdSec, float oscillation) {
+// --- Invio evento all'API: POST /events (l'orario lo mette il server) ---
+void sendEvent(const char* type, int thresholdSec, int oscillazione) {
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
   String body = "{";
-  body += "\"type\":\"";        body += type;                      body += "\",";
-  body += "\"device_code\":\""; body += DEVICE_CODE;               body += "\",";
-  body += "\"ts\":\"";          body += nowString();               body += "\",";
-  body += "\"threshold_sec\":"; body += String(thresholdSec);      body += ",";
-  body += "\"oscillation\":";   body += String(oscillation, 2);    body += ",";
-  body += "\"source\":\"hardware\"";
+  body += "\"type\":\"";        body += type;                  body += "\",";
+  body += "\"device_code\":\""; body += DEVICE_CODE;           body += "\",";
+  body += "\"threshold_sec\":"; body += String(thresholdSec);  body += ",";
+  body += "\"oscillation\":";   body += String(oscillazione);
   body += "}";
 
   http.post("/events", "application/json", body);
@@ -88,54 +71,108 @@ void sendEvent(const char* type, int thresholdSec, float oscillation) {
   Serial.print(") -> HTTP "); Serial.println(status);
 }
 
-// preleva i comandi dall'API -> GET /commands?device=...
-void pollCommands() {
-  http.get(String("/commands?device=") + DEVICE_CODE);
-  int status = http.responseStatusCode();
-  if (status != 200) return;
-  String resp = http.responseBody();          // es. ["ALARM_ON","ALARM_OFF"]
-  if (resp.indexOf("ALARM_ON") >= 0) {
-    digitalWrite(PIN_RELAY, HIGH);
-  }
-  if (resp.indexOf("ALARM_OFF") >= 0) {
-    digitalWrite(PIN_RELAY, LOW);
-    noTone(PIN_BUZZER);
-  }
-}
+void setup() {
+  // Configurazione hardware dei pin
+  pinMode(pinButton, INPUT_PULLUP); 
+  pinMode(pinBuzzer, OUTPUT);
+  pinMode(pinLEDRosso, OUTPUT);   
+  
+  // STATO INIZIALE DI SICUREZZA: Tutto spento all'avvio
+  digitalWrite(pinBuzzer, LOW);
+  noTone(pinBuzzer);
+  digitalWrite(pinLEDRosso, LOW); 
 
-// ===================================================================
-// HOOK da collegare al codice di rilevamento gia' calibrato.
-// detectApnea(): true quando il silenzio supera APNEA_THRESHOLD_SEC.
-// Restituisce anche l'oscillazione corrente (Max-Min) in 'oscOut'.
-// ===================================================================
-bool detectApnea(float &oscOut) {
-  // TODO: inserire qui l'algoritmo a media mobile / DROP_RATIO.
-  oscOut = 0.0;
-  return false;
-}
+  // Inizializziamo la comunicazione seriale (solo debug via USB)
+  Serial.begin(9600);
+  Serial.println("--- SISTEMA ANTI-APNEA: MEMORIA D'ALLARME ATTIVA ---");
 
-bool snoozePressed() {
-  return digitalRead(PIN_SNOOZE) == LOW;       // attivo LOW (INPUT_PULLUP)
+  // Connessione alla rete WiFi
+  connectWiFi();
+  
+  // Fissiamo il punto di partenza del cronometro all'avvio
+  ultimoRespiroMillis = millis(); 
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) connectWiFi();
+  // 1. GESTIONE PULSANTE DI RESET (L'unico modo per spegnere l'allarme)
+  if (digitalRead(pinButton) == LOW) {
+    bool eraInAllarme = inAllarme;          // memorizza se stava suonando
+    inAllarme = false;
+    digitalWrite(pinBuzzer, LOW);
+    noTone(pinBuzzer);
+    digitalWrite(pinLEDRosso, LOW); // Spegne subito il LED rosso
+    
+    // Azzeriamo il cronometro facendolo ripartire da questo istante
+    ultimoRespiroMillis = millis(); 
+    
+    Serial.println("-> RESET EFFETTUATO CON IL PULSANTE. Ripristino monitoraggio. <-");
 
-  float osc = 0.0;
-  if (detectApnea(osc)) {
-    tone(PIN_BUZZER, 1000);                     // allarme sonoro locale
-    digitalWrite(PIN_RELAY, HIGH);
-    sendEvent("APNEA", APNEA_THRESHOLD_SEC, osc);
-    delay(1000);
+    // Notifica SNOOZE all'API solo se stava effettivamente suonando
+    if (eraInAllarme) sendEvent("SNOOZE", 0, 0);
+
+    delay(300); // Ritardo anti-rimbalzo
   }
 
-  if (snoozePressed()) {
-    noTone(PIN_BUZZER);
-    digitalWrite(PIN_RELAY, LOW);
-    sendEvent("SNOOZE", 0, 0.0);
-    delay(500);                                 // antirimbalzo semplice
+  // 2. CAMPIONAMENTO DEL MICROFONO (Eseguito solo se NON siamo già in allarme)
+  int oscillazione = 0;
+  
+  if (!inAllarme) {
+    int maxVal = 0;
+    int minVal = 1023;
+    unsigned long startTime = millis();
+
+    while (millis() - startTime < INTERVALLO) {
+      int lettore = analogRead(pinAnalogico);
+      if (lettore > maxVal) maxVal = lettore;
+      if (lettore < minVal) minVal = lettore;
+    }
+
+    oscillazione = maxVal - minVal;
+
+    // 3. CONTROLLO SOGLIA RUMORE (Se > 30 resetta il timer del silenzio)
+    if (oscillazione > SOGLIA_SILENZIO) {
+      ultimoRespiroMillis = millis(); 
+    }
+
+    // 4. CALCOLO REALE DEI SECONDI TRASCORSI
+    unsigned long tempoPassatoMillis = millis() - ultimoRespiroMillis;
+    int secondiSenzaRumore = tempoPassatoMillis / 1000; 
+
+    // 5. LOGICA DI MONITORAGGIO SULLA SERIALE
+    digitalWrite(pinLEDRosso, LOW); // Garantisce che rimanga spento durante il monitoraggio
+    
+    Serial.print("Oscillazione: ");
+    Serial.print(oscillazione);
+    Serial.print(" | Tempo di Silenzio: ");
+    Serial.print(secondiSenzaRumore);
+    Serial.print("s / ");
+    Serial.print(SOGLIA_APNEA_SECONDI);
+    Serial.println("s");
+
+    // 6. CONTROLLO SCADENZA DEI 12 SECONDI
+    if (secondiSenzaRumore >= SOGLIA_APNEA_SECONDI) {
+      inAllarme = true;
+      Serial.println("!!! ATTENZIONE: ALLARME APNEA SCATTATO !!!");
+
+      // Notifica APNEA all'API
+      sendEvent("APNEA", SOGLIA_APNEA_SECONDI, oscillazione);
+    }
   }
 
-  pollCommands();
-  delay(200);
+  // 7. GESTIONE ALLARME COORDINATO (Buzzer + LED Rosso a intermittenza bloccata)
+  if (inAllarme) {
+    if (millis() - lastBuzzerToggle >= 250) { 
+      buzzerState = !buzzerState;
+      if (buzzerState) {
+        digitalWrite(pinBuzzer, HIGH); 
+        tone(pinBuzzer, 1000); 
+        digitalWrite(pinLEDRosso, HIGH); // Accende il LED rosso
+      } else {
+        digitalWrite(pinBuzzer, LOW);
+        noTone(pinBuzzer);
+        digitalWrite(pinLEDRosso, LOW);  // Spegne il LED rosso
+      }
+      lastBuzzerToggle = millis();
+    }
+  }
 }

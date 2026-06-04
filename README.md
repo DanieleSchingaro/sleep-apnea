@@ -1,82 +1,81 @@
-# Sleep Apnea Monitor — Architettura ad API (Arduino + FastAPI + FlexSim)
+# Sleep Apnea Monitor
 
-Implementazione dell'architettura richiesta: nessun cavo, tutto via API REST,
-un unico database relazionale al centro.
+Digital twin per il rilevamento non invasivo delle apnee notturne. Un dispositivo embedded basato su Arduino monitora il respiro tramite microfono e notifica gli eventi a un backend REST; una simulazione FlexSim replica il sistema su una popolazione virtuale per l'analisi statistica (ROI, falsi positivi/negativi, ottimizzazione delle soglie).
 
-```
-Arduino Nano 33 IoT  --WiFi/HTTP-->  FastAPI  <--REST--  FlexSim (digital twin)
-        (POST eventi)                  |  ^                (GET eventi, POST risultati)
-        (GET comandi) <----------------    |
-                                           v
-                                   Database SQLite
-                              (eventi · pazienti · KPI)
-```
+## Architettura
 
-## File
+Architettura ad API con un unico database relazionale come fonte di verità.
 
-| File | Cosa fa |
+| Componente | Ruolo |
 |---|---|
-| `schema.sql` | Schema del database SQLite (tabelle eventi, pazienti, stanze, KPI…). |
-| `main.py` | API FastAPI: ingestione eventi, lettura per FlexSim, coda comandi, statistiche. |
-| `arduino_apnea_post.ino` | Sketch Nano 33 IoT: connessione WiFi + POST degli eventi all'API. |
-| `flexsim_get_events.fs` | Template FlexScript: GET eventi dall'API e accensione della spia. |
+| Arduino Nano 33 IoT | Rileva le apnee e invia gli eventi via WiFi (HTTP). |
+| API FastAPI | Riceve, valida e persiste gli eventi; li espone via REST. |
+| Database SQLite | Eventi, pazienti, sessioni, configurazioni e KPI. |
+| FlexSim | Digital twin: anima il modello 3D e simula la popolazione di pazienti. |
+
+Flusso dei dati: l'Arduino esegue una `POST` degli eventi all'API, che li scrive nel database; FlexSim legge gli eventi via `GET` per aggiornare il modello e registra i risultati della simulazione tramite l'API.
+
+## Struttura del repository
+
+```
+sleep-apnea-monitor/
+├── api/                       # API FastAPI e schema del database
+│   ├── main.py
+│   ├── schema.sql
+│   └── requirements.txt
+├── arduino_apnea_post/        # Firmware Arduino (rilevamento + invio WiFi)
+│   ├── arduino_apnea_post.ino
+│   └── arduino_secrets.h      # credenziali WiFi (non versionato)
+├── sketchup/                  # Modello 3D dell'ambiente
+│   ├── strutturaFissa.skp            # modello SketchUp (ambiente statico)
+│   └── strutturaFissa.dae            # esportazione Collada per FlexSim
+│   └── ```
+└── flexsim/                   # Modello e script FlexSim
+    ├── modello.fsm            # modello FlexSim
+    └── flexsim_get_events.fs  # script FlexScript
+```
+
+> I file binari (`.skp`, `.dae`, `.fsm`) possono essere versionati, ma non si fondono in parallelo: vanno modificati da una persona alla volta (o gestiti con Git LFS se diventano grandi).
+
+## Requisiti
+
+- Python 3.10+
+- Arduino IDE con le librerie WiFiNINA e ArduinoHttpClient e il pacchetto Arduino SAMD Boards
+- FlexSim con supporto HTTP (v20.1+; v22.1+ consigliata per le POST in JSON)
 
 ## Avvio dell'API
 
 ```bash
-pip install fastapi "uvicorn[standard]"
+cd api
+pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-- Documentazione interattiva (e test manuale): `http://localhost:8000/docs`
-- Il database `apnea.db` viene creato al primo avvio dallo `schema.sql`.
-- `--host 0.0.0.0` è necessario perché l'Arduino raggiunga il PC sulla rete.
+Documentazione interattiva su `http://localhost:8000/docs`. Il database `apnea.db` viene creato automaticamente al primo avvio.
 
 ## Endpoint
 
-| Metodo / rotta | Chi la usa | Scopo |
+| Metodo | Rotta | Descrizione |
 |---|---|---|
-| `POST /events` | Arduino | invia un evento `APNEA` o `SNOOZE` (JSON) |
-| `GET /events` | FlexSim / dashboard | eventi di apnea con `id > since` (JSON) |
-| `GET /events.csv` | FlexSim | stessi dati in CSV, facili da `split()` |
-| `GET /commands?device=` | Arduino | preleva i comandi pendenti (ALARM_ON/OFF) |
-| `POST /commands` | API / FlexSim | accoda un comando di attuazione |
-| `POST /responses` | FlexSim | registra il tempo di risposta del personale |
-| `GET /stats` | dashboard | KPI: totale apnee, TP/FP/FN, snooze, tempo medio |
+| `POST` | `/events` | Registra un evento di apnea o snooze. |
+| `GET` | `/events` | Elenca gli eventi (lettura incrementale tramite `since`). |
+| `GET` | `/commands` | Comandi di attuazione pendenti per un dispositivo. |
+| `POST` | `/responses` | Registra un intervento del personale. |
+| `GET` | `/stats` | KPI aggregati (TP/FP/FN, tempi di risposta). |
 
-Esempio di evento inviato dall'Arduino:
+## Configurazione
 
-```json
-{ "type": "APNEA", "device_code": "DEV01",
-  "ts": "2026-06-04 23:10:00", "threshold_sec": 12,
-  "oscillation": 2.3, "source": "hardware" }
-```
+- **Arduino** — impostare `SERVER_IP` e `DEVICE_CODE` nello sketch; creare `arduino_secrets.h` con le credenziali WiFi.
+- **FlexSim** — impostare l'URL dell'API nello script `flexsim_get_events.fs`.
 
-## Note di integrazione
+I file `apnea.db`, `apnea.log` e `arduino_secrets.h` sono esclusi dal versionamento.
 
-- **Identificazione della stanza:** ogni dispositivo ha un `device_code`
-  (es. `DEV01`). L'API e FlexSim lo usano per accendere la spia giusta
-  (`Spia_DEV01`) e per collegare l'evento alla stanza nel database.
+## Autori
+Daniele Schingaro 
+d.schingaro04@gmail.com
 
-- **FlexSim → API:** FlexSim chiama l'API con la classe `Http.Request`
-  (nativa dalla v20.1). Si è scelto l'endpoint **CSV** per evitare il parsing
-  JSON in FlexScript. Su versioni FlexSim < 22.1 le POST con `Content-Type:
-  application/json` possono dare problemi (default `x-www-form-urlencoded`):
-  per questo FlexSim qui fa soprattutto **GET**.
+Luca Antonio Pistilli
+lucapistilli17@gmail.com
 
-- **Hardware vs simulazione:** il campo `source` distingue gli eventi reali
-  (`hardware`, dall'Arduino) da quelli dei 200+ agenti (`simulazione`,
-  generati da FlexSim e inviati con lo stesso `POST /events`). Stesso schema,
-  stesse query: filtri per `source` quando vuoi confrontarli.
-
-- **Falsi positivi/negativi:** la tabella `ground_truth` contiene le apnee
-  "vere" degli agenti simulati; confrontandola con `apnea_events` classifichi
-  ogni evento (`classe` = TP/FP/FN) e calcoli i KPI in `GET /stats`.
-
-- **Tracciamento (`apnea.log`):** ogni evento, comando e risposta viene
-  scritto anche in `apnea.log` (in chiaro, con orario), oltre che nel database.
-  Comodo per ricostruire la cronologia o allegare un log alla relazione.
-
-- **Git:** `apnea.db` e `apnea.log` sono generati a runtime e NON vanno
-  versionati (sono già nel `.gitignore`). Si versionano solo i sorgenti.
-
+Tiberio Sasso
+t.sasso3@studenti.uniba.it

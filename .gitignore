@@ -1,22 +1,21 @@
-# --- file generati a runtime: NON vanno versionati ---
+#file generati a runtime
 apnea.db
 apnea.log
 
-# --- Python ---
+#credenziali WiFi:
+arduino_secrets.h
+
+#Python
 __pycache__/
 *.pyc
 .venv/
 venv/
 
-# --- editor / OS ---
+#editor/OS
 .vscode/
 .DS_Store
 
-# --- FlexSim / SketchUp: file di backup automatici ---
+#FlexSim / SketchUp
 *.bak
 *.~*
 ~*.skp
-
-# NOTA: i modelli FlexSim (.fsm) e SketchUp (.skp) "buoni" puoi versionarli,
-# ma sono binari: due persone non possono modificarli in parallelo.
-# Coordinatevi (uno alla volta) o valutate Git LFS per i file grandi.
