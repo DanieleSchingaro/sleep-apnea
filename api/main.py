@@ -95,6 +95,10 @@ def post_event(ev: EventIn):
     ts = ev.ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # orario lato server se assente
     conn = get_conn()
     cur = conn.cursor()
+
+    #auto-registra il device se non esiste
+    cur.execute("INSERT OR IGNORE INTO devices (code) VALUES (?)", (ev.device_code,))
+
     if t == "APNEA":
         cur.execute(
             "INSERT INTO apnea_events (device_code, ts, threshold_sec, oscillation, source) "

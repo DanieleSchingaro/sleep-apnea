@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS apnea_events (
     classe        TEXT,                      -- 'TP' | 'FP' | 'FN' | NULL
     source        TEXT DEFAULT 'hardware',   -- 'hardware' | 'simulazione'
     created_at    TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (device_code) REFERENCES devices(code)
 );
 
 CREATE TABLE IF NOT EXISTS snooze_events (
@@ -72,7 +73,8 @@ CREATE TABLE IF NOT EXISTS snooze_events (
     ts          TEXT NOT NULL,
     source      TEXT DEFAULT 'hardware',
     created_at  TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (device_code) REFERENCES devices(code)
 );
 
 -- Verita' di riferimento (per calcolare TP/FP/FN sugli agenti simulati)
@@ -99,7 +101,8 @@ CREATE TABLE IF NOT EXISTS commands (
     device_code TEXT NOT NULL,
     command     TEXT NOT NULL,               -- es. "ALARM_ON" | "ALARM_OFF"
     created_at  TEXT DEFAULT (datetime('now')),
-    consumed    INTEGER DEFAULT 0
+    consumed    INTEGER DEFAULT 0,
+    FOREIGN KEY (device_code) REFERENCES devices(code)
 );
 
 CREATE INDEX IF NOT EXISTS idx_apnea_device ON apnea_events(device_code);
