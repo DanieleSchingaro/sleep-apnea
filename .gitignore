@@ -1,9 +1,12 @@
-#file generati a runtime
+#File generati a runtime (Server)
 apnea.db
 apnea.log
 
-#credenziali WiFi:
-arduino_secrets.h
+#File di scambio FlexSim <-> Server 
+/flexsim/live_alarm.txt
+/flexsim/events.csv
+/flexsim/response.txt
+*.tmp
 
 #Python
 __pycache__/
@@ -11,11 +14,12 @@ __pycache__/
 .venv/
 venv/
 
-#editor/OS
+#Editor/OS 
 .vscode/
 .DS_Store
+Thumbs.db
 
-#FlexSim / SketchUp
+#FlexSim/SketchUp
 *.bak
 *.~*
 ~*.skp
